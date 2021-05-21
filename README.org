@@ -1,0 +1,171 @@
+#+TITLE: K8S the hard way KVM
+
+* Setup
+
+* Install the client tools
+
+** Certificates
+
+Certificate management tooling:
+
+#+begin_src sh
+wget -q --show-progress --https-only --timestamping \
+  https://storage.googleapis.com/kubernetes-the-hard-way/cfssl/1.4.1/linux/cfssl \
+  https://storage.googleapis.com/kubernetes-the-hard-way/cfssl/1.4.1/linux/cfssljson
+
+chmod +x ./cfssl
+chmod +x ./cfssljson
+#+end_src
+
+** Kubectl
+
+=Kubectl= is assumed to already be installed.
+
+** KCLI
+
+To provision the infrastructure resources instead of using =glcoud= this will
+use =kcli= to bring up machines on the lokal desktop:
+
+#+begin_src sh
+sudo dnf -y copr enable karmab/kcli
+sudo dnf -y install kcli
+#+end_src
+* Provisiong the compute resources
+
+** Configure kcli
+
+First the local endpoint must be configured to be used by =kcli= as well as the
+the =default= storage pool and a =network= to be used by the machines:
+
+#+begin_src sh
+kcli create host -H 127.0.0.1 local
+
+kcli create pool -p /var/lib/libvirt/images default
+# Optionally allow the currently logged in used to access this pool of images:
+sudo setfacl -m u:$(id -un):rwx /var/lib/libvirt/images
+
+kcli create network -c 10.192.0.0/24 --domain k8s.thw.local k8s-thw
+#+end_src
+
+Firewall rules don't need to be configured as the communication between host and
+machines inside the same network is allowed by default.
+
+To be able to boot the machines a =cloud-image= is needed - in this case Ubuntu
+20.04:
+
+#+begin_src sh
+kcli download image ubuntu2004 --pool default
+#+end_src
+
+Booting the required machines can be done using a =yaml= definition file for profiles.
+The file needs to be stored in =~/.kcli/profiles=
+
+#+begin_src yaml :tangle yes
+local_ubuntu2004:
+  image: focal-server-cloudimg-amd64.img
+
+loadbalancer:
+  image: focal-server-cloudimg-amd64.img
+  numcpus: 1
+  memory: 512
+  disk:
+    - size: 10
+  nets:
+    - k8s-thw
+  reservedns: True
+  reserveip: True
+  reservehost: True
+
+node:
+  image: focal-server-cloudimg-amd64.img
+  numcpus: 2
+  memory: 1024
+  disk:
+    - size: 10
+  nets:
+    - k8s-thw
+  reservedns: True
+  reserveip: True
+  reservehost: True
+#+end_src
+
+Starting the nodes can now be achieved in a simple loop:
+
+#+begin_src sh
+for node in master00 master01 master02; do
+    kcli create vm --profile node ${node}
+done
+#+end_src
+
+#+begin_src sh
+for node in worker00 worker01 worker03; do
+    kcli create vm --profile node ${node}
+done
+#+end_src
+
+And deploy a single loadbalancer for the master nodes that will run =HAProxy=:
+
+#+begin_src sh
+kcli create vm --profile loadbalancer lb
+#+end_src
+
+The configuration for the loadbalancer will be as follows:
+
+#+NAME: domain
+#+begin_src sh
+echo k8s.thw.local
+#+end_src
+
+
+#+NAME: ip
+#+begin_src sh :noweb yes :var fqdn="master00"
+kcli ssh $fqdn dig +short $fqdn.<<domain()>>
+#+end_src
+
+#+begin_src conf :noweb yes :tangle haproxy.cfg
+global
+    log         127.0.0.1 local2
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+    stats socket /var/lib/haproxy/stats
+
+defaults
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option                  http-server-close
+    option                  redispatch
+    retries                 3
+    timeout http-request    10s
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout http-keep-alive 10s
+    timeout check           10s
+    maxconn                 3000
+
+listen stats :9000
+    stats enable
+    stats realm Haproxy\ Statistics
+    stats uri /haproxy_stats
+    stats auth admin:password
+    stats refresh 30
+    mode http
+
+frontend  main *:6443
+    default_backend mgmt6443
+    option tcplog
+
+backend mgmt6443
+    balance source
+    mode tcp
+    # MASTERS 6443
+    server master00.<<domain()>> <<ip(fqdn='master00')>>:6443 check
+    server master01.<<domain()>> <<ip(fqdn='master01')>>:6443 check
+    server master02.<<domain()>> <<ip(fqdn='master02')>>:6443 check
+#+end_src
