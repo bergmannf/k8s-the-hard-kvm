@@ -111,6 +111,8 @@ And deploy a single loadbalancer for the master nodes that will run =HAProxy=:
 kcli create vm --profile loadbalancer lb
 #+end_src
 
+** Configuring the LoadBalancer
+
 The configuration for the loadbalancer will be as follows:
 
 #+NAME: domain
@@ -174,3 +176,62 @@ backend mgmt6443
     server master01.<<domain()>> <<ip(fqdn='master01')>>:6443 check
     server master02.<<domain()>> <<ip(fqdn='master02')>>:6443 check
 #+end_src
+
+* CA and TLS Certificates
+Generate a =CA= certificate and the corresponding certificates needed for the
+following components:
+- etcd
+- kube-apiserver
+- kube-controller-manager
+- kube-scheduler
+- kubelet
+- kube-proxy
+** CA Certificate
+Generate a CA certificate using =cfssl=:
+
+Configure the =CA=:
+
+#+begin_src js :tangle ca-config.json
+{
+    "signing": {
+        "default": {
+            "expiry": "8760h"
+        }
+    },
+    "profiles": {
+        "kubernetes": {
+            "usages": ["signing", "key encipherment", "server auth", "client auth"]
+            "expiry": "8760h"
+        }
+    }
+}
+#+end_src
+
+Configure a =certificate signing request= for the =CA=:
+
+#+begin_src js :tangle ca-csr.json
+{
+    "CN": "Kubernetes",
+    "key": {
+        "algo": "rsa",
+        "size": 2048
+    },
+    "names": [{
+        "C": "DE",
+        "L": "Nuremberg",
+        "O": "Kubernetes",
+        "OU": "CA",
+        "ST": "Bavaria"
+    }]
+}
+#+end_src
+
+Generate the =key= and =certificate= for the CA:
+
+#+begin_src sh
+./cfssl gencert -initca ca-csr.json | ./cfssljson -bare ca
+#+end_src
+
+*** TODO Do all of this using =openssl= directly
+
+** Client and Server certificates
